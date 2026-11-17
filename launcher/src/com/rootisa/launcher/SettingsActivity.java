@@ -34,10 +34,12 @@ import java.net.URL;
  */
 public class SettingsActivity extends Activity {
 
-    // Update channel. Point this at a stable branch or a Releases asset when ready.
-    private static final String UPDATE_BRANCH = "claude/vibrant-sagan-ev4hhh";
+    // Update channel. Works once the GitHub repo is PUBLIC (raw.githubusercontent.com
+    // returns 404 for private repos without a token — do NOT embed a token here).
+    // The refs/heads/ form disambiguates a branch name that contains slashes.
+    // For production you can switch this to .../refs/heads/main/dist/ or a Releases URL.
     private static final String UPDATE_BASE =
-            "https://raw.githubusercontent.com/kl1ms1/RooTISA/" + UPDATE_BRANCH + "/dist/";
+            "https://raw.githubusercontent.com/kl1ms1/RooTISA/refs/heads/claude/vibrant-sagan-ev4hhh/dist/";
     private static final String VERSION_URL = UPDATE_BASE + "version.txt";
     private static final String APK_URL = UPDATE_BASE + "RooTISA.apk";
     private static final String APK_NAME = "update.apk";
