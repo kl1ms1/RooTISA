@@ -162,6 +162,23 @@ public class MainActivity extends Activity {
 
         col.addView(grid);
         root.addView(col);
+
+        // Settings (gear) button, pinned top-right.
+        TextView gear = new TextView(this);
+        gear.setText("⚙");
+        gear.setTextColor(0xDDDCE6FA);
+        gear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        gear.setPadding(dp(12), dp(10), dp(14), dp(10));
+        gear.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+            }
+        });
+        FrameLayout.LayoutParams gp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        gp.gravity = Gravity.TOP | Gravity.RIGHT;
+        root.addView(gear, gp);
+
         return root;
     }
 
