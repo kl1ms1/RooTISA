@@ -1,0 +1,9 @@
+# Build outputs
+launcher/build/
+*.apk
+*.dex
+*.keystore
+
+# Toolchain (downloaded separately, large)
+android-tools/
+android-sdk/
