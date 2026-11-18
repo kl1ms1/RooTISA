@@ -250,8 +250,12 @@ public class SettingsActivity extends Activity {
         c.setReadTimeout(30000);
         c.setRequestProperty("User-Agent", "RooTISA-Updater");
         c.connect();
-        if (c.getResponseCode() / 100 != 2) {
-            throw new Exception("HTTP " + c.getResponseCode());
+        int code = c.getResponseCode();
+        if (code == 404) {
+            throw new Exception("канал пуст или репозиторий ещё приватный");
+        }
+        if (code / 100 != 2) {
+            throw new Exception("сервер ответил HTTP " + code);
         }
         return c;
     }
