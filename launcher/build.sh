@@ -63,14 +63,5 @@ fi
     --out "$OUT/$APP.apk" "$OUT/$APP.aligned.apk"
 
 "$APKSIGNER" verify --print-certs "$OUT/$APP.apk" >/dev/null && echo "signature OK"
-
-echo "==> publish update channel artifacts to dist/"
-VC="$("$AAPT" dump badging "$OUT/$APP.apk" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p")"
-DIST="$HERE/../dist"
-mkdir -p "$DIST"
-cp "$OUT/$APP.apk" "$DIST/$APP.apk"
-printf '%s\n' "$VC" > "$DIST/version.txt"
-echo "    dist/$APP.apk + dist/version.txt (versionCode=$VC)"
-
 echo
 echo "==> BUILT: $OUT/$APP.apk  ($(du -h "$OUT/$APP.apk" | cut -f1))"

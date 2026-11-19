@@ -1,11 +1,14 @@
 package com.rootisa.launcher;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ComponentName;
-import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
@@ -19,188 +22,296 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowManager;
-import android.widget.AdapterView;
-import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
-import android.widget.GridView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
- * RooTISA — a tiny, low-RAM home launcher tuned for the XS11 (MTK6580, 240x432).
- * Pure framework APIs, no AndroidX. UI is built in code to keep the APK minimal.
+ * RooTISA home — iOS-like side-paging launcher, squircle icons, per-app tweaks.
+ * Pure framework, no AndroidX, no background services (stays cool and light).
  */
 public class MainActivity extends Activity {
 
+    private static final int REQ_ICON = 1001;
+
     private float density;
+    private Prefs prefs;
     private TextView clockView;
-    private TextView dateView;
-    private GridView grid;
-    private AppAdapter adapter;
+    private LinearLayout dots;
+    private PagedHome paged;
+
     private final List<AppItem> apps = new ArrayList<AppItem>();
+    private final Map<String, Drawable> iconCache = new HashMap<String, Drawable>();
+    private String pendingIconPkg; // app awaiting a chosen image
 
     private final SimpleDateFormat timeFmt = new SimpleDateFormat("HH:mm", Locale.getDefault());
-    private final SimpleDateFormat dateFmt = new SimpleDateFormat("EEE, d MMM", Locale.getDefault());
 
-    // Lightweight minute-ticking clock without extra threads.
-    private final Handler clockHandler = new Handler() {
-        @Override public void handleMessage(Message msg) {
-            updateClock();
-            sendEmptyMessageDelayed(0, 15000); // 15s is plenty; cheap on battery
+    private final Handler clock = new Handler() {
+        @Override public void handleMessage(Message m) {
+            if (clockView != null) clockView.setText(timeFmt.format(new Date()));
+            sendEmptyMessageDelayed(0, 15000);
         }
     };
 
+    private int dp(float v) { return Math.round(v * density); }
+
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
         density = getResources().getDisplayMetrics().density;
-        setContentView(buildUi());
-        loadApps();
-        adapter = new AppAdapter();
-        grid.setAdapter(adapter);
+        prefs = new Prefs(this);
+        rebuild();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        updateClock();
-        clockHandler.removeMessages(0);
-        clockHandler.sendEmptyMessage(0);
-        // Refresh the app list cheaply so installs/uninstalls show up.
-        reloadAppsIfChanged();
+        clock.removeMessages(0);
+        clock.sendEmptyMessage(0);
+        rebuild(); // reflect installs / hides / tweaks cheaply
     }
 
     @Override
     protected void onPause() {
         super.onPause();
-        clockHandler.removeMessages(0);
+        clock.removeMessages(0);
     }
 
-    // Home launchers should swallow BACK so it never "exits" to a black screen.
     @Override
     public void onBackPressed() {
-        if (grid != null) grid.smoothScrollToPosition(0);
+        if (paged != null) paged.smoothScrollTo(0, 0);
     }
 
-    private int dp(float v) {
-        return Math.round(v * density);
-    }
+    // ---- Build the whole home surface --------------------------------------
 
-    // ---- UI ----------------------------------------------------------------
+    private void rebuild() {
+        loadApps();
+        setContentView(buildUi());
+    }
 
     private View buildUi() {
+        int accent = prefs.accent();
+
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundDrawable(backgroundGradient());
+        root.setBackgroundDrawable(new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0x660A1022, 0x33140B24})); // scrim so wallpaper shows through
 
         LinearLayout col = new LinearLayout(this);
         col.setOrientation(LinearLayout.VERTICAL);
-        col.setPadding(dp(8), dp(10), dp(8), dp(4));
 
-        // Header "glass" panel: clock + date + brand.
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.VERTICAL);
-        header.setBackgroundDrawable(glassPanel(dp(14)));
-        header.setPadding(dp(12), dp(8), dp(12), dp(8));
+        // Top bar: clock + gear.
+        FrameLayout bar = new FrameLayout(this);
+        bar.setPadding(dp(14), dp(8), dp(10), dp(6));
 
         clockView = new TextView(this);
         clockView.setTextColor(Color.WHITE);
-        clockView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 30);
+        clockView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         clockView.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
+        clockView.setText(timeFmt.format(new Date()));
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.gravity = Gravity.CENTER_VERTICAL | Gravity.LEFT;
+        bar.addView(clockView, clp);
 
-        dateView = new TextView(this);
-        dateView.setTextColor(0xCCB9CBE8);
-        dateView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-
-        TextView brand = new TextView(this);
-        brand.setText("RooTISA");
-        brand.setTextColor(0x805BA8FF);
-        brand.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9);
-
-        header.addView(clockView);
-        header.addView(dateView);
-        header.addView(brand);
-
-        LinearLayout.LayoutParams hp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        hp.bottomMargin = dp(8);
-        col.addView(header, hp);
-
-        // App grid.
-        grid = new GridView(this);
-        grid.setNumColumns(3);
-        grid.setVerticalSpacing(dp(6));
-        grid.setHorizontalSpacing(dp(6));
-        grid.setPadding(dp(2), dp(4), dp(2), dp(8));
-        grid.setClipToPadding(false);
-        grid.setSelector(new GradientDrawable()); // transparent selector, no ugly orange flash
-        grid.setVerticalScrollBarEnabled(false);
-        grid.setLayoutParams(new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
-        grid.setOnItemClickListener(new AdapterView.OnItemClickListener() {
-            @Override public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
-                launch(apps.get(position));
-            }
-        });
-        grid.setOnItemLongClickListener(new AdapterView.OnItemLongClickListener() {
-            @Override public boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id) {
-                openAppInfo(apps.get(position));
-                return true;
-            }
-        });
-
-        col.addView(grid);
-        root.addView(col);
-
-        // Settings (gear) button, pinned top-right.
         TextView gear = new TextView(this);
         gear.setText("⚙");
-        gear.setTextColor(0xDDDCE6FA);
+        gear.setTextColor(0xDDFFFFFF);
         gear.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
-        gear.setPadding(dp(12), dp(10), dp(14), dp(10));
+        gear.setPadding(dp(10), dp(4), dp(8), dp(4));
         gear.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                startActivity(new Intent(MainActivity.this, SettingsActivity.class));
+                startActivity(new Intent(MainActivity.this, TweaksActivity.class));
             }
         });
-        FrameLayout.LayoutParams gp = new FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        gp.gravity = Gravity.TOP | Gravity.RIGHT;
-        root.addView(gear, gp);
+        glp.gravity = Gravity.CENTER_VERTICAL | Gravity.RIGHT;
+        bar.addView(gear, glp);
+        col.addView(bar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        // Paged app grid.
+        paged = new PagedHome(this);
+        LinearLayout pagesRow = new LinearLayout(this);
+        pagesRow.setOrientation(LinearLayout.HORIZONTAL);
+        paged.addView(pagesRow, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        col.addView(paged, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        // Page dots.
+        dots = new LinearLayout(this);
+        dots.setOrientation(LinearLayout.HORIZONTAL);
+        dots.setGravity(Gravity.CENTER);
+        dots.setPadding(0, dp(6), 0, dp(10));
+        col.addView(dots, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        root.addView(col);
+
+        // Fill pages once we know the real width.
+        final LinearLayout pagesRowF = pagesRow;
+        final int accentF = accent;
+        paged.post(new Runnable() {
+            @Override public void run() {
+                int w = paged.getWidth();
+                int h = paged.getHeight();
+                if (w <= 0) w = getResources().getDisplayMetrics().widthPixels;
+                if (h <= 0) h = getResources().getDisplayMetrics().heightPixels;
+                fillPages(pagesRowF, w, h, accentF);
+            }
+        });
         return root;
     }
 
-    private GradientDrawable backgroundGradient() {
-        GradientDrawable g = new GradientDrawable(
-                GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFF0A1022, 0xFF0E1630, 0xFF140B24});
-        return g;
+    private void fillPages(LinearLayout pagesRow, int pageW, int pageH, int accent) {
+        pagesRow.removeAllViews();
+        int cols = prefs.columns();
+        int cell = pageW / cols;
+        int iconPx = (int) (cell * 0.58f);
+        int rows = Math.max(3, (pageH - dp(8)) / (iconPx + dp(prefs.labels() ? 26 : 10)));
+        int perPage = cols * rows;
+        if (perPage <= 0) perPage = cols * 4;
+
+        int total = apps.size();
+        int pages = Math.max(1, (total + perPage - 1) / perPage);
+        buildDots(pages, accent);
+
+        for (int pg = 0; pg < pages; pg++) {
+            LinearLayout page = new LinearLayout(this);
+            page.setOrientation(LinearLayout.VERTICAL);
+            page.setLayoutParams(new LinearLayout.LayoutParams(pageW, LinearLayout.LayoutParams.MATCH_PARENT));
+            page.setPadding(dp(6), dp(4), dp(6), dp(4));
+
+            for (int r = 0; r < rows; r++) {
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+                for (int cc = 0; cc < cols; cc++) {
+                    int idx = pg * perPage + r * cols + cc;
+                    View tile = (idx < total) ? tile(apps.get(idx), iconPx) : new View(this);
+                    LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0,
+                            ViewGroup.LayoutParams.MATCH_PARENT, 1f);
+                    row.addView(tile, tlp);
+                }
+                page.addView(row, rlp);
+            }
+            pagesRow.addView(page);
+        }
+
+        paged.setOnPageChange(new PagedHome.OnPageChange() {
+            @Override public void onPage(int page, int count) { highlightDot(page); }
+        });
     }
 
-    private GradientDrawable glassPanel(int radius) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(0x22FFFFFF);            // faux-frosted fill
-        g.setCornerRadius(radius);
-        g.setStroke(dp(1), 0x33FFFFFF);    // subtle highlight edge
-        return g;
+    private View tile(final AppItem app, int iconPx) {
+        LinearLayout cell = new LinearLayout(this);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(Gravity.CENTER_HORIZONTAL);
+        cell.setPadding(dp(2), dp(6), dp(2), dp(4));
+
+        ImageView iv = new ImageView(this);
+        iv.setImageDrawable(iconFor(app, iconPx));
+        LinearLayout.LayoutParams ip = new LinearLayout.LayoutParams(iconPx, iconPx);
+        cell.addView(iv, ip);
+
+        if (prefs.labels()) {
+            TextView tv = new TextView(this);
+            tv.setText(app.displayName());
+            tv.setTextColor(0xFFFFFFFF);
+            tv.setShadowLayer(3f, 0, 1, 0xAA000000);
+            tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9);
+            tv.setGravity(Gravity.CENTER);
+            tv.setMaxLines(1);
+            tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            tp.topMargin = dp(4);
+            cell.addView(tv, tp);
+        }
+
+        cell.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { launch(app); }
+        });
+        cell.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override public boolean onLongClick(View v) { customize(app); return true; }
+        });
+        return cell;
     }
 
-    private void updateClock() {
-        Date now = new Date();
-        if (clockView != null) clockView.setText(timeFmt.format(now));
-        if (dateView != null) dateView.setText(dateFmt.format(now));
+    // ---- Icons -------------------------------------------------------------
+
+    private Drawable iconFor(AppItem app, int size) {
+        boolean sq = prefs.squircle();
+        String custom = prefs.iconPath(app.packageName);
+        String key = app.packageName + "|" + size + "|" + sq + "|" + (custom == null ? "" : custom);
+        Drawable d = iconCache.get(key);
+        if (d != null) return d;
+
+        if (custom != null) {
+            d = IconTools.fromFile(getResources(), custom, size, sq);
+        }
+        if (d == null) {
+            Drawable base = app.icon;
+            if (base == null) {
+                try {
+                    base = getPackageManager().getActivityIcon(
+                            new ComponentName(app.packageName, app.activityName));
+                } catch (Exception e) {
+                    try { base = getPackageManager().getApplicationIcon(app.packageName); }
+                    catch (Exception ignored) {}
+                }
+                app.icon = base;
+            }
+            d = sq ? IconTools.squircle(getResources(), base, size) : base;
+        }
+        if (d != null) iconCache.put(key, d);
+        return d;
+    }
+
+    // ---- Page dots ---------------------------------------------------------
+
+    private void buildDots(int count, int accent) {
+        dots.removeAllViews();
+        for (int i = 0; i < count; i++) {
+            View dot = new View(this);
+            GradientDrawable g = new GradientDrawable();
+            g.setShape(GradientDrawable.OVAL);
+            g.setColor(i == 0 ? accent : 0x55FFFFFF);
+            dot.setBackgroundDrawable(g);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(6), dp(6));
+            lp.leftMargin = dp(3); lp.rightMargin = dp(3);
+            dots.addView(dot, lp);
+        }
+        dots.setTag(accent);
+    }
+
+    private void highlightDot(int active) {
+        int accent = dots.getTag() == null ? prefs.accent() : (Integer) dots.getTag();
+        for (int i = 0; i < dots.getChildCount(); i++) {
+            GradientDrawable g = new GradientDrawable();
+            g.setShape(GradientDrawable.OVAL);
+            g.setColor(i == active ? accent : 0x55FFFFFF);
+            dots.getChildAt(i).setBackgroundDrawable(g);
+        }
     }
 
     // ---- App list ----------------------------------------------------------
@@ -215,29 +326,18 @@ public class MainActivity extends Activity {
         for (int i = 0; i < found.size(); i++) {
             ResolveInfo ri = found.get(i);
             String pkg = ri.activityInfo.packageName;
-            if (self.equals(pkg)) continue; // hide ourselves
+            if (self.equals(pkg)) continue;
+            if (prefs.isHidden(pkg)) continue;
             String label = ri.loadLabel(pm).toString();
-            apps.add(new AppItem(label, pkg, ri.activityInfo.name));
+            AppItem it = new AppItem(label, pkg, ri.activityInfo.name);
+            it.custom = prefs.name(pkg, null);
+            apps.add(it);
         }
         Collections.sort(apps, new Comparator<AppItem>() {
             @Override public int compare(AppItem a, AppItem b) {
-                return a.label.compareToIgnoreCase(b.label);
+                return a.displayName().compareToIgnoreCase(b.displayName());
             }
         });
-    }
-
-    private int lastCount = -1;
-
-    private void reloadAppsIfChanged() {
-        PackageManager pm = getPackageManager();
-        Intent main = new Intent(Intent.ACTION_MAIN, null);
-        main.addCategory(Intent.CATEGORY_LAUNCHER);
-        int count = pm.queryIntentActivities(main, 0).size();
-        if (count != lastCount) {
-            lastCount = count;
-            loadApps();
-            if (adapter != null) adapter.notifyDataSetChanged();
-        }
     }
 
     private void launch(AppItem app) {
@@ -248,14 +348,97 @@ public class MainActivity extends Activity {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
             startActivity(i);
         } catch (Exception e) {
-            // Fallback to the package's default launch intent.
             Intent fb = getPackageManager().getLaunchIntentForPackage(app.packageName);
-            if (fb != null) {
-                fb.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(fb);
-            } else {
-                Toast.makeText(this, "Не удалось открыть", Toast.LENGTH_SHORT).show();
+            if (fb != null) { fb.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); startActivity(fb); }
+            else Toast.makeText(this, "Не удалось открыть", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    // ---- Per-app customize -------------------------------------------------
+
+    private void customize(final AppItem app) {
+        final String[] items = new String[]{"Переименовать", "Сменить иконку",
+                "Сбросить иконку", "Скрыть", "О приложении"};
+        new AlertDialog.Builder(this)
+                .setTitle(app.displayName())
+                .setItems(items, new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int which) {
+                        if (which == 0) rename(app);
+                        else if (which == 1) pickIcon(app);
+                        else if (which == 2) { prefs.setIconPath(app.packageName, null);
+                            iconCache.clear(); rebuild(); }
+                        else if (which == 3) { prefs.setHidden(app.packageName, true); rebuild(); }
+                        else openAppInfo(app);
+                    }
+                })
+                .show();
+    }
+
+    private void rename(final AppItem app) {
+        final EditText in = new EditText(this);
+        in.setText(app.displayName());
+        new AlertDialog.Builder(this)
+                .setTitle("Название")
+                .setView(in)
+                .setPositiveButton("ОК", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int w) {
+                        String v = in.getText().toString().trim();
+                        prefs.setName(app.packageName, v.length() == 0 ? app.label : v);
+                        rebuild();
+                    }
+                })
+                .setNegativeButton("Отмена", null)
+                .show();
+    }
+
+    private void pickIcon(AppItem app) {
+        pendingIconPkg = app.packageName;
+        try {
+            Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+            i.setType("image/*");
+            startActivityForResult(Intent.createChooser(i, "Выбери картинку"), REQ_ICON);
+        } catch (Exception e) {
+            Toast.makeText(this, "Нет галереи", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int req, int res, Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req == REQ_ICON && res == RESULT_OK && data != null && pendingIconPkg != null) {
+            Uri uri = data.getData();
+            if (uri != null) {
+                String path = saveIcon(uri, pendingIconPkg);
+                if (path != null) {
+                    prefs.setIconPath(pendingIconPkg, path);
+                    iconCache.clear();
+                    Toast.makeText(this, "Иконка обновлена", Toast.LENGTH_SHORT).show();
+                }
             }
+            pendingIconPkg = null;
+        }
+    }
+
+    private String saveIcon(Uri uri, String pkg) {
+        InputStream in = null;
+        FileOutputStream out = null;
+        try {
+            in = getContentResolver().openInputStream(uri);
+            Bitmap bmp = BitmapFactory.decodeStream(in);
+            if (bmp == null) return null;
+            int s = 144;
+            Bitmap scaled = Bitmap.createScaledBitmap(bmp, s, s, true);
+            File dir = new File(getFilesDir(), "icons");
+            dir.mkdirs();
+            File f = new File(dir, pkg.replaceAll("[^a-zA-Z0-9]", "_") + "_" + System.currentTimeMillis() + ".png");
+            out = new FileOutputStream(f);
+            scaled.compress(Bitmap.CompressFormat.PNG, 100, out);
+            return f.getAbsolutePath();
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            try { if (in != null) in.close(); } catch (Exception ignored) {}
+            try { if (out != null) out.close(); } catch (Exception ignored) {}
         }
     }
 
@@ -265,74 +448,6 @@ public class MainActivity extends Activity {
             i.setData(Uri.parse("package:" + app.packageName));
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(i);
-        } catch (Exception e) {
-            Toast.makeText(this, app.label, Toast.LENGTH_SHORT).show();
-        }
-    }
-
-    // ---- Adapter -----------------------------------------------------------
-
-    private class AppAdapter extends BaseAdapter {
-        @Override public int getCount() { return apps.size(); }
-        @Override public Object getItem(int position) { return apps.get(position); }
-        @Override public long getItemId(int position) { return position; }
-
-        @Override
-        public View getView(int position, View convertView, ViewGroup parent) {
-            LinearLayout cell;
-            ImageView iv;
-            TextView tv;
-            if (convertView == null) {
-                cell = new LinearLayout(MainActivity.this);
-                cell.setOrientation(LinearLayout.VERTICAL);
-                cell.setGravity(Gravity.CENTER_HORIZONTAL);
-                cell.setPadding(dp(2), dp(6), dp(2), dp(6));
-
-                FrameLayout tile = new FrameLayout(MainActivity.this);
-                tile.setBackgroundDrawable(glassPanel(dp(12)));
-                int tileSize = dp(52);
-                FrameLayout.LayoutParams tilp = new FrameLayout.LayoutParams(tileSize, tileSize);
-
-                iv = new ImageView(MainActivity.this);
-                int icon = dp(34);
-                FrameLayout.LayoutParams ip = new FrameLayout.LayoutParams(icon, icon);
-                ip.gravity = Gravity.CENTER;
-                tile.addView(iv, ip);
-
-                tv = new TextView(MainActivity.this);
-                tv.setTextColor(0xFFE6ECF7);
-                tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9);
-                tv.setGravity(Gravity.CENTER);
-                tv.setMaxLines(1);
-                tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
-
-                LinearLayout.LayoutParams tvp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                tvp.topMargin = dp(4);
-
-                cell.addView(tile, new LinearLayout.LayoutParams(tileSize, tileSize));
-                cell.addView(tv, tvp);
-                cell.setTag(new View[]{iv, tv});
-            } else {
-                cell = (LinearLayout) convertView;
-                View[] holder = (View[]) cell.getTag();
-                iv = (ImageView) holder[0];
-                tv = (TextView) holder[1];
-            }
-
-            AppItem app = apps.get(position);
-            if (app.icon == null) {
-                try {
-                    app.icon = getPackageManager().getActivityIcon(
-                            new ComponentName(app.packageName, app.activityName));
-                } catch (Exception e) {
-                    try { app.icon = getPackageManager().getApplicationIcon(app.packageName); }
-                    catch (Exception ignored) {}
-                }
-            }
-            iv.setImageDrawable(app.icon);
-            tv.setText(app.label);
-            return cell;
-        }
+        } catch (Exception ignored) {}
     }
 }

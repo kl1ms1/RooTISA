@@ -1,11 +1,10 @@
 # Build outputs
 launcher/build/
+dist/
+*.apk
 *.dex
 *.keystore
 
 # Toolchain (downloaded separately, large)
 android-tools/
 android-sdk/
-
-# dist/ IS committed (it is the GitHub update channel):
-#   dist/RooTISA.apk, dist/version.txt
